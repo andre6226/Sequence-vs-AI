@@ -32,7 +32,6 @@
     </div>
 </div>
 
-<script src="js/game/sequence.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 <script type="module">
     import { initGame } from './js/game/gamemain.js';

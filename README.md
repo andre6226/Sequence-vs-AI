@@ -17,7 +17,8 @@ client-side. Il backend PHP gestisce account, chat e classifica.
 ## Stack
 
 PHP 8.2 + Apache, MariaDB, JavaScript a moduli ES senza framework.
-Logica di gioco in C++ compilata in WebAssembly, inferenza con ONNX Runtime Web.
+Regole e stato della partita in JavaScript; la rete viene eseguita con
+ONNX Runtime Web.
 
 ## Avvio
 
@@ -40,17 +41,10 @@ api/                 endpoint JSON
   core/              env, database, JWT, helper condivisi
   auth/ user/ chat/ game/
 js/core/             client API, UI, routing
-js/game/             regole, board, motore WebAssembly
+js/game/             regole, stato della partita, rendering
 sequence_net/        pipeline di training (notebook Colab + datagen C++)
 sequence_net.onnx    rete caricata dal browser
 ```
-
-## Sicurezza
-
-Credenziali fuori dal codice, controllo dell'origine sulle richieste che
-modificano dati, limite ai tentativi di login, autenticazione richiesta su tutti
-gli endpoint privati. L'`.htaccess` imposta CSP e header di sicurezza e blocca
-l'accesso web a `.env`, `.git` e allo schema del database.
 
 ## Training
 
@@ -59,4 +53,4 @@ con ONNX Runtime), i record diventano un dataset, training PyTorch su policy e
 value, riesportazione in ONNX, si ripete. Il notebook è pensato per Colab e
 rileva da solo se girare su Drive o in locale.
 
-![Architettura della rete](sequence_net/architettura.png)
+[Grafo completo della rete (export Netron)](sequence_net/architettura.png)
