@@ -3,8 +3,11 @@
     Allow from all
 </Limit>
 
-# Niente elenco automatico del contenuto delle cartelle
-Options -Indexes
+# Nasconde il contenuto delle cartelle prive di index.
+# Nota: NON usare "Options -Indexes". Sull'hosting universitario AllowOverride
+# non concede Options e l'intero sito va in 500. IndexIgnore sta in un'altra
+# classe di override ed e' accettato in entrambi gli ambienti.
+IndexIgnore *
 
 # --- File che non devono mai essere serviti via web ---
 
@@ -12,8 +15,10 @@ Options -Indexes
 RedirectMatch 404 (?i)(^|/)\.(?!well-known)
 
 # Cartella di training della rete: serve solo per Colab, non al sito.
+# Il pattern non e' ancorato a inizio path: il sito puo' stare in una
+# sottocartella (es. /~utente/ su hosting universitario).
 # (Attenzione: NON tocca /sequence_net.onnx alla radice, che serve al gioco.)
-RedirectMatch 404 (?i)^/sequence_net/
+RedirectMatch 404 (?i)(^|/)sequence_net/
 
 # Schema del database e dump SQL
 <FilesMatch "(?i)^(initdb|.*\.(sql|log|bak|ini|md|swp))$">

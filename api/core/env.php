@@ -11,9 +11,19 @@ class Env {
         if (self::$vars !== null) return;
         self::$vars = [];
 
-        // Il .env sta nella document root del progetto (due livelli sopra api/core)
-        $path = __DIR__ . '/../../.env';
-        if (!is_readable($path)) return;
+        // Posizioni possibili del .env, in ordine di preferenza:
+        //  1. fuori dalla document root (hosting tipo public_html): il file
+        //     non e' raggiungibile dal web nemmeno se .htaccess non funziona
+        //  2. nella document root del progetto (setup Docker di sviluppo)
+        $candidati = [
+            __DIR__ . '/../../../.env',
+            __DIR__ . '/../../.env',
+        ];
+        $path = null;
+        foreach ($candidati as $c) {
+            if (is_readable($c)) { $path = $c; break; }
+        }
+        if ($path === null) return;
 
         foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
             $line = trim($line);
