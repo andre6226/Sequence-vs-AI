@@ -50,7 +50,10 @@ sequence_net.onnx    rete caricata dal browser
 
 In `sequence_net/`: la rete gioca contro sé stessa (`datagen`, C++ multi-thread
 con ONNX Runtime), i record diventano un dataset, training PyTorch su policy e
-value, riesportazione in ONNX, si ripete. Il notebook è pensato per Colab e
-rileva da solo se girare su Drive o in locale.
+value, riesportazione in ONNX, si ripete. Una rete nuova sostituisce quella in
+uso solo se la batte in un torneo diretto (`datagen/match.cpp`). Il notebook è
+pensato per Colab e rileva da solo se girare su Drive o in locale.
+`recover_weights.py` ricostruisce un checkpoint PyTorch da un `.onnx`, se il
+`.pth` è andato perso.
 
 [Grafo completo della rete (export Netron)](sequence_net/architettura.png)

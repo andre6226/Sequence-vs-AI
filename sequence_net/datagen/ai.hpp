@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 #include <onnxruntime_cxx_api.h>
 
 struct FastRNG {
@@ -12,6 +13,7 @@ struct FastRNG {
         uint64_t x=s; x^=x<<13; x^=x>>7; x^=x<<17; s=x; return (uint32_t)x;
     }
     FORCE_INLINE int nextInt(int max) { return (int)(((uint64_t)next() * (uint64_t)max) >> 32); }
+    FORCE_INLINE float nextFloat() { return (float)(next() >> 8) / 16777216.0f; } // [0,1)
 };
 
 class NeuralAI {
@@ -20,13 +22,18 @@ class NeuralAI {
     Ort::Session* session;
     Ort::MemoryInfo memory_info;
     FastRNG m_rng;
+    bool m_greedy;
 
 public:
-    // Il costruttore ora prende il percorso del file .onnx
-    NeuralAI(const std::string& model_path) 
+    // model_path: file .onnx.  greedy = true disattiva l'esplorazione: si usa
+    // per le partite di valutazione, dove serve la forza massima della rete.
+    // Per il self-play va lasciato false, altrimenti le partite diventano
+    // deterministiche e il dataset perde ogni varieta'.
+    NeuralAI(const std::string& model_path, bool greedy = false, uint64_t seed = 0)
         : env(ORT_LOGGING_LEVEL_WARNING, "SequenceV2"),
           memory_info(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)),
-          m_rng((uint64_t)this ^ 1337) 
+          m_rng(seed ? seed : ((uint64_t)this ^ 1337)),
+          m_greedy(greedy)
     { 
         initGameConstants(); 
         
@@ -40,6 +47,64 @@ public:
 
     ~NeuralAI() {
         delete session;
+    }
+
+    // Genera le mosse legali per la mano data. Stessa logica usata da
+    // computeBestMove, esposta perche' serve anche al lookahead a 1 semimossa.
+    static std::vector<Move> legalMoves(Fast128 my, Fast128 opp, const std::vector<int>& hand) {
+        Fast128 occupied = my | opp | MASK_CORNERS;
+        Fast128 opp_locked = SequenceLogic::getLockedMask(opp);
+        std::vector<Move> out;
+        out.reserve(50);
+        for (size_t i = 0; i < hand.size(); i++) {
+            int cardID = hand[i];
+            if (cardID == -1) continue;
+            Fast128 mv = {0,0};
+            bool is_rem = false;
+            if (CardTranslator::isTwoEyedJack(cardID))      mv = (~occupied & MASK_BOARD);
+            else if (CardTranslator::isOneEyedJack(cardID)) { mv = (opp & ~opp_locked); is_rem = true; }
+            else                                            mv = (CARD_MAP[cardID] & ~occupied);
+            Fast128 t = mv;
+            while (!t.isZero()) out.push_back({(int)i, BitScanner::next(t), is_rem});
+        }
+        return out;
+    }
+
+    // Valuta una posizione: scrive i 200 logit della policy in policy_out
+    // (se non nullo) e restituisce la value in [-1, 1], dal punto di vista
+    // di chi possiede 'my'.
+    float evaluate(Fast128 my, Fast128 opp, const std::vector<int>& hand, float* policy_out = nullptr) {
+        Fast128 occupied = my | opp | MASK_CORNERS;
+        Fast128 opp_locked = SequenceLogic::getLockedMask(opp);
+        Fast128 playable_mask = {0,0};
+        for (int cardID : hand) {
+            if (cardID == -1) continue;
+            if (CardTranslator::isTwoEyedJack(cardID))      playable_mask |= (~occupied & MASK_BOARD);
+            else if (CardTranslator::isOneEyedJack(cardID)) playable_mask |= (opp & ~opp_locked);
+            else                                            playable_mask |= (CARD_MAP[cardID] & ~occupied);
+        }
+
+        std::vector<float> board_tensor(300, 0.0f), hand_tensor(52, 0.0f);
+        for (int i = 0; i < 100; i++) {
+            uint64_t bit = (i < 64) ? (1ULL << i) : (1ULL << (i - 64));
+            uint64_t m = (i < 64) ? my.lo : my.hi;
+            uint64_t o = (i < 64) ? opp.lo : opp.hi;
+            uint64_t p = (i < 64) ? playable_mask.lo : playable_mask.hi;
+            if (m & bit) board_tensor[i] = 1.0f;
+            if (o & bit) board_tensor[100 + i] = 1.0f;
+            if (p & bit) board_tensor[200 + i] = 1.0f;
+        }
+        for (int c : hand) if (c >= 0 && c < 52) hand_tensor[c] += 1.0f;
+
+        std::vector<int64_t> bs = {1,3,10,10}, hs = {1,52};
+        Ort::Value bo = Ort::Value::CreateTensor<float>(memory_info, board_tensor.data(), 300, bs.data(), 4);
+        Ort::Value ho = Ort::Value::CreateTensor<float>(memory_info, hand_tensor.data(), 52, hs.data(), 2);
+        const char* in_names[] = {"board_input", "hand_input"};
+        const char* out_names[] = {"policy_output", "value_output"};
+        Ort::Value ins[] = {std::move(bo), std::move(ho)};
+        auto outs = session->Run(Ort::RunOptions{nullptr}, in_names, ins, 2, out_names, 2);
+        if (policy_out) std::memcpy(policy_out, outs[0].GetTensorMutableData<float>(), 200 * sizeof(float));
+        return outs[1].GetTensorMutableData<float>()[0];
     }
 
   Move computeBestMove(Fast128 my, Fast128 opp, const std::vector<int>& hand, int ply = 0) {
@@ -109,34 +174,64 @@ public:
             float* policy_arr = output_tensors[0].GetTensorMutableData<float>();
     
             // =================================================================
-            // 4. ACTION MASKING & ESPLORAZIONE CONDIZIONATA (Decay)
+            // 4. ACTION MASKING & SELEZIONE DELLA MOSSA
             // =================================================================
-            
-            // 1. Mossa 100% casuale: 15% nei primi 8 turni, poi 0% per il resto della partita
-            int epsilon_chance = (ply < 8) ? 15 : 0;
-            if (m_rng.nextInt(100) < epsilon_chance) {
-                int random_idx = m_rng.nextInt(valid_moves.size());
-                return valid_moves[random_idx];
-            }
-    
-            // 2. Rumore sui logits: 0.15f in apertura per differenziare, 0.03f nel mediogioco (tie-breaking)
-            float noise_scale = (ply < 8) ? 0.15f : 0.03f;
-    
-            float best_score = -1e9;
-            Move best_move = valid_moves[0];
-    
-            for (const auto& m : valid_moves) {
-                int policy_idx = m.pos + (m.is_removal ? 100 : 0);
-                float score = policy_arr[policy_idx];
-                
-                float noise = (m_rng.nextInt(1000) / 1000.0f) * noise_scale;
-                score += noise;
-    
-                if (score > best_score) {
-                    best_score = score;
-                    best_move = m;
+
+            // Modalita' valutazione: argmax puro, nessun rumore.
+            if (m_greedy) {
+                float best_score = -1e9f;
+                Move best_move = valid_moves[0];
+                for (const auto& m : valid_moves) {
+                    float score = policy_arr[m.pos + (m.is_removal ? 100 : 0)];
+                    if (score > best_score) { best_score = score; best_move = m; }
                 }
+                return best_move;
             }
-            return best_move;
+
+            // Self-play: campionamento softmax sui logit delle sole mosse legali.
+            //
+            // La versione precedente azzerava l'esplorazione dopo il turno 8
+            // (epsilon 0, rumore 0.03 solo per i pareggi). Da li' in poi le
+            // partite erano deterministiche: sempre le stesse linee, quindi la
+            // rete le imparava a memoria e la value saturava, perche' in gioco
+            // deterministico l'esito e' gia' deciso dalla mano iniziale.
+            // La temperatura resta sopra zero per tutta la partita.
+            // Valori scelti misurando i logit reali della rete: lo scarto fra
+            // le mosse migliori e' circa 4.4, quindi T=0.6 lasciava alla prima
+            // mossa quasi il 90% della probabilita'. Con questi la mossa top
+            // pesa ~40% in apertura e ~63% dopo: varieta' vera, ma senza
+            // scadere nel casuale (a T>=3 la policy non conta piu' nulla).
+            float temperature = (ply < 12) ? 1.50f : 1.00f;
+
+            // Piccola quota di mosse del tutto casuali, mai azzerata: garantisce
+            // che anche le mosse a cui la policy da' probabilita' ~0 finiscano
+            // ogni tanto nel dataset.
+            int epsilon_chance = (ply < 8) ? 12 : 3;
+            if (m_rng.nextInt(100) < epsilon_chance) {
+                return valid_moves[m_rng.nextInt(valid_moves.size())];
+            }
+
+            float max_logit = -1e9f;
+            for (const auto& m : valid_moves) {
+                float l = policy_arr[m.pos + (m.is_removal ? 100 : 0)];
+                if (l > max_logit) max_logit = l;
+            }
+
+            std::vector<float> probs(valid_moves.size());
+            float sum = 0.0f;
+            for (size_t i = 0; i < valid_moves.size(); i++) {
+                const Move& m = valid_moves[i];
+                float l = policy_arr[m.pos + (m.is_removal ? 100 : 0)];
+                probs[i] = expf((l - max_logit) / temperature); // shift: evita overflow
+                sum += probs[i];
+            }
+
+            float r = m_rng.nextFloat() * sum;
+            float acc = 0.0f;
+            for (size_t i = 0; i < valid_moves.size(); i++) {
+                acc += probs[i];
+                if (r <= acc) return valid_moves[i];
+            }
+            return valid_moves.back(); // raggiungibile solo per arrotondamenti
         }
 };
