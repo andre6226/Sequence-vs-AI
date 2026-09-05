@@ -107,6 +107,81 @@ public:
         return outs[1].GetTensorMutableData<float>()[0];
     }
 
+    // Ricerca a 1 semimossa. Prende le TOP_K mosse col prior piu' alto, applica
+    // ognuna, valuta la posizione risultante e le ordina per value + prior*0.3
+    // (la stessa formula usata dal sito in js/game/game.js).
+    //
+    // Serve anche al self-play, non solo alla valutazione: se il dataset
+    // registrasse la mossa campionata dalla policy, la rete verrebbe
+    // addestrata sulle proprie stesse scelte e non avrebbe alcun modo di
+    // migliorare. Registrando invece la mossa scelta dalla ricerca, la policy
+    // impara a imitare qualcosa di piu' forte di se' stessa.
+    //
+    //  greedy = true  -> restituisce la migliore (valutazione, e sito)
+    //  greedy = false -> campiona fra le candidate (self-play)
+    static const int TOP_K = 3;
+
+    // Peso del prior nel punteggio della ricerca: score = value + prior*PRIOR_W.
+    // Va tenuto basso, altrimenti il prior schiaccia la value e il lookahead
+    // non decide piu' niente (i due termini hanno scale molto diverse).
+    float PRIOR_W = 0.30f;
+
+    Move search1Ply(Fast128 my, Fast128 opp, const std::vector<int>& hand,
+                    int ply = 0, bool greedy = true) {
+        std::vector<Move> legal = legalMoves(my, opp, hand);
+        if (legal.empty()) return {-1, -1, false};
+
+        // Quota di mosse del tutto casuali, su TUTTE le legali: senza questa
+        // il self-play resterebbe confinato alle prime tre della policy.
+        if (!greedy) {
+            int epsilon_chance = (ply < 8) ? 12 : 3;
+            if (m_rng.nextInt(100) < epsilon_chance)
+                return legal[m_rng.nextInt(legal.size())];
+        }
+
+        float policy[200];
+        evaluate(my, opp, hand, policy);
+
+        std::sort(legal.begin(), legal.end(), [&](const Move& a, const Move& b) {
+            return policy[a.pos + (a.is_removal ? 100 : 0)] >
+                   policy[b.pos + (b.is_removal ? 100 : 0)];
+        });
+        if ((int)legal.size() > TOP_K) legal.resize(TOP_K);
+        if (legal.size() == 1) return legal[0];
+
+        std::vector<float> scores(legal.size());
+        for (size_t i = 0; i < legal.size(); i++) {
+            const Move& m = legal[i];
+            Fast128 simMy = my, simOpp = opp;
+            if (m.is_removal) clearBit(simOpp, m.pos); else setBit(simMy, m.pos);
+            std::vector<int> simHand = hand;
+            simHand.erase(simHand.begin() + m.card_idx_in_hand);
+            float prior = policy[m.pos + (m.is_removal ? 100 : 0)];
+            scores[i] = evaluate(simMy, simOpp, simHand) + prior * PRIOR_W;
+        }
+
+        if (greedy) {
+            size_t best = 0;
+            for (size_t i = 1; i < scores.size(); i++) if (scores[i] > scores[best]) best = i;
+            return legal[best];
+        }
+
+        // Campionamento softmax sui punteggi della ricerca (non sui logit grezzi)
+        float temperature = (ply < 12) ? 0.35f : 0.20f;
+        float mx = *std::max_element(scores.begin(), scores.end());
+        float sum = 0.0f;
+        for (size_t i = 0; i < scores.size(); i++) {
+            scores[i] = expf((scores[i] - mx) / temperature);
+            sum += scores[i];
+        }
+        float r = m_rng.nextFloat() * sum, acc = 0.0f;
+        for (size_t i = 0; i < legal.size(); i++) {
+            acc += scores[i];
+            if (r <= acc) return legal[i];
+        }
+        return legal.back();
+    }
+
   Move computeBestMove(Fast128 my, Fast128 opp, const std::vector<int>& hand, int ply = 0) {
             Fast128 occupied = my | opp | MASK_CORNERS;
             Fast128 opp_locked = SequenceLogic::getLockedMask(opp);

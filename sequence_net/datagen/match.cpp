@@ -16,38 +16,6 @@
 
 std::mutex out_mtx;
 
-// Selezione a 1 semimossa, identica a quella del sito (js/game/game.js):
-// si prendono le 3 mosse col prior piu' alto, si applica ognuna, si valuta la
-// posizione risultante e si sceglie il massimo di  value + prior * 0.3.
-Move choose1Ply(NeuralAI& ai, Fast128 my, Fast128 opp, const std::vector<int>& hand) {
-    std::vector<Move> legal = NeuralAI::legalMoves(my, opp, hand);
-    if (legal.empty()) return {-1, -1, false};
-
-    float policy[200];
-    ai.evaluate(my, opp, hand, policy);
-
-    std::sort(legal.begin(), legal.end(), [&](const Move& a, const Move& b) {
-        return policy[a.pos + (a.is_removal ? 100 : 0)] > policy[b.pos + (b.is_removal ? 100 : 0)];
-    });
-    if (legal.size() > 3) legal.resize(3);
-    if (legal.size() == 1) return legal[0];
-
-    float best = -1e9f;
-    Move chosen = legal[0];
-    for (const Move& m : legal) {
-        Fast128 simMy = my, simOpp = opp;
-        if (m.is_removal) clearBit(simOpp, m.pos); else setBit(simMy, m.pos);
-
-        std::vector<int> simHand = hand;
-        simHand.erase(simHand.begin() + m.card_idx_in_hand);
-
-        float prior = policy[m.pos + (m.is_removal ? 100 : 0)];
-        float score = ai.evaluate(simMy, simOpp, simHand) + prior * 0.3f;
-        if (score > best) { best = score; chosen = m; }
-    }
-    return chosen;
-}
-
 // Ritorna +1 se vince chi muove per primo, -1 se vince l'altro, 0 patta.
 bool USE_1PLY = true;  // true = come il sito; false = solo policy in argmax
 
@@ -72,7 +40,7 @@ int playGame(NeuralAI* first, NeuralAI* second, uint32_t seed) {
         std::vector<int>& hand = firstTurn ? h1 : h2;
         NeuralAI* ai = firstTurn ? first : second;
 
-        Move mv = USE_1PLY ? choose1Ply(*ai, mine, theirs, hand)
+        Move mv = USE_1PLY ? ai->search1Ply(mine, theirs, hand, ply, true)
                            : ai->computeBestMove(mine, theirs, hand, ply);
         if (mv.pos == -1) return 0;
 
@@ -95,6 +63,8 @@ int main(int argc, char** argv) {
     int THREADS = (argc >= 3) ? std::stoi(argv[2]) : 4;
     std::string PATH_A = argv[3], PATH_B = argv[4];
     if (argc >= 6) USE_1PLY = (std::string(argv[5]) != "policy");
+    float WA = (argc >= 7) ? std::stof(argv[6]) : 0.30f;
+    float WB = (argc >= 8) ? std::stof(argv[7]) : 0.30f;
 
     initGameConstants();
 
@@ -104,6 +74,7 @@ int main(int argc, char** argv) {
     auto worker = [&](int tid, int pairs) {
         NeuralAI aiA(PATH_A, true, 1000 + tid);   // greedy: valutazione, non self-play
         NeuralAI aiB(PATH_B, true, 2000 + tid);
+        aiA.PRIOR_W = WA; aiB.PRIOR_W = WB;
         for (int i = 0; i < pairs; i++) {
             uint32_t seed = 90000u + tid * 100000u + i;
             // Stesso mazzo giocato due volte, invertendo chi comincia
