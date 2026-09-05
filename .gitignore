@@ -1,0 +1,9 @@
+# Credenziali e configurazione locale: mai nel repository
+.env
+.env.*
+!.env.example
+
+# File temporanei
+*.swp
+*~
+.DS_Store

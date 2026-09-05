@@ -1,0 +1,43 @@
+<Limit GET POST PUT DELETE OPTIONS>
+    Require all granted
+    Allow from all
+</Limit>
+
+# Niente elenco automatico del contenuto delle cartelle
+Options -Indexes
+
+# --- File che non devono mai essere serviti via web ---
+
+# Qualsiasi percorso che contenga un elemento nascosto: .env, .git/, .gitignore...
+RedirectMatch 404 (?i)(^|/)\.(?!well-known)
+
+# Schema del database e dump SQL
+<FilesMatch "(?i)^(initdb|.*\.(sql|log|bak|ini|md|swp))$">
+    Require all denied
+</FilesMatch>
+
+# --- Header di sicurezza ---
+<IfModule mod_headers.c>
+    # Impedisce al browser di indovinare il tipo di contenuto
+    Header always set X-Content-Type-Options "nosniff"
+
+    # Difesa da clickjacking (versione legacy, affiancata da frame-ancestors)
+    Header always set X-Frame-Options "DENY"
+
+    # Non far uscire l'URL completo verso siti esterni
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+    # Il sito non usa questi dispositivi: li disattivo a monte
+    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=()"
+
+    # Content Security Policy: le risorse possono arrivare solo da qui e dalla
+    # CDN usata per onnxruntime. Blocca l'incorporamento in iframe di terzi e
+    # l'invio dei form verso domini esterni.
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
+    # La pagina di gioco carica il runtime ONNX, che in alcune build compila
+    # codice a runtime: qui serve una policy leggermente piu' larga.
+    <FilesMatch "^game\.php$">
+        Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://cdn.jsdelivr.net; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    </FilesMatch>
+</IfModule>
