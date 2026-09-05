@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Script di pubblicazione: contiene il percorso e l'utenza del server
+deploy.sh
+
 # File temporanei
 *.swp
 *~
