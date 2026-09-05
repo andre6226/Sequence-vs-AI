@@ -7,3 +7,8 @@
 *.swp
 *~
 .DS_Store
+
+# Artefatti generati dal training (rigenerati a ogni run)
+dataset_worker_*.bin
+*.pth
+onnxruntime-linux-x64-*/

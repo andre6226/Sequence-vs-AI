@@ -11,6 +11,10 @@ Options -Indexes
 # Qualsiasi percorso che contenga un elemento nascosto: .env, .git/, .gitignore...
 RedirectMatch 404 (?i)(^|/)\.(?!well-known)
 
+# Cartella di training della rete: serve solo per Colab, non al sito.
+# (Attenzione: NON tocca /sequence_net.onnx alla radice, che serve al gioco.)
+RedirectMatch 404 (?i)^/sequence_net/
+
 # Schema del database e dump SQL
 <FilesMatch "(?i)^(initdb|.*\.(sql|log|bak|ini|md|swp))$">
     Require all denied
