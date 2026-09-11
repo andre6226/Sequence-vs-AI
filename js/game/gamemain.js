@@ -14,5 +14,5 @@ export async function initGame() {
     await gameInstance.loadModel();
     gameInstance.start();
     
-    console.log("Sequence Engine (Neural ONNX) caricato con successo!");
+    console.log("Motore di gioco pronto.");
 }

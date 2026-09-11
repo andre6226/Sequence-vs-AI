@@ -32,7 +32,9 @@
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+<!-- il parametro di versione va cambiato a ogni ricompilazione del motore,
+     altrimenti i browser continuano a usare la copia in cache -->
+<script src="js/game/sequence.js?v=1"></script>
 <script type="module">
     import { initGame } from './js/game/gamemain.js';
     initGame().catch(console.error);

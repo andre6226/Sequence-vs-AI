@@ -1,5 +1,6 @@
 #pragma once
 #include "board.hpp"
+#include "moves.hpp"
 #include <vector>
 #include <cstring>
 #include <algorithm>
@@ -51,23 +52,9 @@ public:
 
     // Genera le mosse legali per la mano data. Stessa logica usata da
     // computeBestMove, esposta perche' serve anche al lookahead a 1 semimossa.
+    // Involucro storico: la logica vera sta in moves.hpp, senza dipendenze.
     static std::vector<Move> legalMoves(Fast128 my, Fast128 opp, const std::vector<int>& hand) {
-        Fast128 occupied = my | opp | MASK_CORNERS;
-        Fast128 opp_locked = SequenceLogic::getLockedMask(opp);
-        std::vector<Move> out;
-        out.reserve(50);
-        for (size_t i = 0; i < hand.size(); i++) {
-            int cardID = hand[i];
-            if (cardID == -1) continue;
-            Fast128 mv = {0,0};
-            bool is_rem = false;
-            if (CardTranslator::isTwoEyedJack(cardID))      mv = (~occupied & MASK_BOARD);
-            else if (CardTranslator::isOneEyedJack(cardID)) { mv = (opp & ~opp_locked); is_rem = true; }
-            else                                            mv = (CARD_MAP[cardID] & ~occupied);
-            Fast128 t = mv;
-            while (!t.isZero()) out.push_back({(int)i, BitScanner::next(t), is_rem});
-        }
-        return out;
+        return legalMovesFor(my, opp, hand);
     }
 
     // Valuta una posizione: scrive i 200 logit della policy in policy_out

@@ -3,10 +3,14 @@ import { GameState, Rules } from './logic.js';
 import { ApiClient } from '../core/api.js';
 
 export class Game {
+    // Tempo di ricerca del motore, in millisecondi.
+    static THINK_MS = 200;     // per scegliere la mossa
+    static WINRATE_MS = 70;    // per aggiornare la sola barra
+
     constructor(ui) {
         this.ui = ui;
         this.selIdx = -1;
-        this.onnxSession = null;
+        this.engine = null;   // motore MCTS in WebAssembly
     }
 
     start(restart = false) {
@@ -17,7 +21,7 @@ export class Game {
             Object.assign(this.state, parsed);
             this.selIdx = -1;
             this.render();
-            if (this.onnxSession) {
+            if (this.engine) {
                 this.updatePlayerPerspectiveWinRate();
             }
             return;
@@ -37,19 +41,36 @@ export class Game {
         }
 
         this.render();
-        if (this.onnxSession) {
+        if (this.engine) {
             this.updatePlayerPerspectiveWinRate();
         }
     }
 
+    // Carica il motore compilato in WebAssembly. Nessuna rete neurale,
+    // nessuna CDN: sono circa 90 KB serviti dal sito stesso.
     async loadModel() {
-        this.onnxSession = await ort.InferenceSession.create('./sequence_net.onnx', {
-            executionProviders: ['wasm']
-        });
-        console.log("Rete Neurale caricata nel browser!");
+        const Module = await createSequenceModule();
+        this.wasm = Module;
+        this.engine = new Module.SequenceEngine();
+        console.log("Motore MCTS (WebAssembly) caricato.");
         if (this.state) {
             await this.updatePlayerPerspectiveWinRate();
         }
+    }
+
+    // Costruisce gli argomenti per il motore dal punto di vista di `player`.
+    // Il motore vuole 2 = chi sta chiedendo, 1 = l'avversario.
+    _engineArgs(player) {
+        const other = player === 1 ? 2 : 1;
+        const grid = new this.wasm.VectorInt();
+        for (let i = 0; i < 100; i++) {
+            const owner = this.state.grid[i];
+            grid.push_back(owner === player ? 2 : (owner === other ? 1 : 0));
+        }
+        const hand = new this.wasm.VectorString();
+        for (const c of this.state.hands[player]) if (c && c !== '') hand.push_back(c);
+        const oppHand = this.state.hands[other].filter(c => c && c !== '').length;
+        return { grid, hand, oppHand, deck: this.state.deck.length };
     }
 
     render() {
@@ -102,198 +123,65 @@ export class Game {
         this._replaceOneDeadCard(this.state.currentPlayer);
         this._saveGame();
 
-        await this.updatePlayerPerspectiveWinRate();
+        await this.updatePlayerPerspectiveWinRate(this._pendingAiWinRate ?? null);
+        this._pendingAiWinRate = null;
 
         if (this.state.currentPlayer === 2) setTimeout(() => { this.aiMove(); }, 0);
     }
 
-    async updatePlayerPerspectiveWinRate() {
-        if (!this.onnxSession || !this.state) return;
+    // La barra non e' piu' la previsione di una rete: e' la frazione di
+    // partite simulate che il giocatore vince. Una misura, non una stima.
+    // Dopo la mossa dell'AI il numero c'e' gia' (basta rovesciarlo); negli
+    // altri casi si fa una ricerca breve, che per la sola barra basta.
+    async updatePlayerPerspectiveWinRate(aiWinRate = null) {
+        if (!this.engine || !this.state) return;
 
-        // 1. Canale 0 = Pedine Umano, Canale 1 = Pedine AI
-        const boardArray = new Float32Array(300);
-        for (let i = 0; i < 100; i++) {
-            const owner = this.state.grid[i];
-            if (owner === 1) boardArray[i] = 1.0;
-            else if (owner === 2) boardArray[100 + i] = 1.0;
+        let p1;
+        if (aiWinRate !== null) {
+            p1 = Math.round((1 - aiWinRate) * 100);
+        } else {
+            const a = this._engineArgs(1);
+            this.engine.computeBestMove(a.grid, a.hand, Game.WINRATE_MS, a.oppHand, a.deck);
+            p1 = Math.round(this.engine.winRate() * 100);
+            a.grid.delete(); a.hand.delete();
         }
+        p1 = Math.min(100, Math.max(0, p1));
 
-        // Canale 2: Mosse lecite generate dalla mano del giocatore umano
-        this.state.hands[1].forEach(card => {
-            if (card && card !== '') {
-                const { validMoves } = Rules.getValidMoves(this.state, card);
-                validMoves.forEach(pos => {
-                    boardArray[200 + pos] = 1.0;
-                });
-            }
-        });
-
-        // 2. Vettore one-hot a 52 dimensioni per la mano del giocatore
-        const handArray = new Float32Array(52);
-        for (const card of this.state.hands[1]) {
-            const cardId = this._getCardId(card);
-            if (cardId >= 0 && cardId <= 51) handArray[cardId] += 1.0;
-        }
-
-        // 3. Inferenza dal punto di vista del giocatore umano
-        const feeds = {
-            "board_input": new ort.Tensor('float32', boardArray, [1, 3, 10, 10]),
-            "hand_input":  new ort.Tensor('float32', handArray, [1, 52])
-        };
-
-        const results = await this.onnxSession.run(feeds);
-        const playerValue = results.value_output.data[0]; // Stima compresa in [-1.0, 1.0]
-
-        const playerWinPct = Math.min(100, Math.max(0, Math.round(((playerValue + 1.0) / 2.0) * 100)));
-        
-        this.state.winRate = {
-            p1: playerWinPct,
-            ai: 100 - playerWinPct
-        };
-
+        this.state.winRate = { p1: p1, ai: 100 - p1 };
         this.render();
     }
 
     async aiMove() {
-        if (!this.onnxSession) {
-            console.error("Modello ONNX non ancora caricato!");
+        if (!this.engine) {
+            console.error("Motore non ancora caricato.");
             return;
         }
 
-        // 1. Inferenza iniziale della Policy per l'AI
-        const { boardArray, handArray } = this._prepareTensorsForAI();
-        const rootFeeds = {
-            "board_input": new ort.Tensor('float32', boardArray, [1, 3, 10, 10]),
-            "hand_input":  new ort.Tensor('float32', handArray, [1, 52])
-        };
-        const rootResults = await this.onnxSession.run(rootFeeds);
-        const policy = rootResults.policy_output.data;
+        const a = this._engineArgs(2);
+        const mv = this.engine.computeBestMove(a.grid, a.hand, Game.THINK_MS, a.oppHand, a.deck);
+        const aiWin = this.engine.winRate();
+        a.grid.delete(); a.hand.delete();
 
-        // 2. Action Masking e raccolta mosse legali dell'AI
-        const legalMoves = [];
-        this.state.hands[2].forEach((card, cardIdx) => {
-            const { validMoves, isRemoval } = Rules.getValidMoves(this.state, card);
-            validMoves.forEach(pos => {
-                const policyIndex = pos + (isRemoval ? 100 : 0);
-                legalMoves.push({
-                    pos,
-                    cardIdx,
-                    card,
-                    isRemoval,
-                    prior: policy[policyIndex]
-                });
-            });
-        });
-
-        if (legalMoves.length === 0) {
+        if (!mv || mv.pos < 0) {           // nessuna mossa: pesca e passa
             this.state.hands[2][0] = this.state.deck.pop() || '';
             this.state.currentPlayer = 1;
             this.render();
             return;
         }
 
-        legalMoves.sort((a, b) => b.prior - a.prior);
-        const topCandidates = legalMoves.slice(0, 3);
-
-        if (topCandidates.length === 1) {
-            this.executeMove(2, topCandidates[0].pos, topCandidates[0].cardIdx, topCandidates[0].isRemoval);
+        // Il motore riceve solo le carte giocabili, quindi il suo indice puo'
+        // non coincidere con quello nella mano vera: si riallinea qui.
+        const playable = [];
+        this.state.hands[2].forEach((c, i) => { if (c && c !== '') playable.push(i); });
+        const cardIdx = playable[mv.card_idx];
+        if (cardIdx === undefined) {
+            this.state.currentPlayer = 1;
+            this.render();
             return;
         }
 
-        // 3. Lookahead tattico a 1 semimossa
-        let bestOverallScore = -Infinity;
-        let chosenMove = topCandidates[0];
-
-        for (const cand of topCandidates) {
-            const simGrid = [...this.state.grid];
-            if (cand.isRemoval) simGrid[cand.pos] = 0;
-            else simGrid[cand.pos] = 2;
-
-            const simHand = [...this.state.hands[2]];
-            simHand.splice(cand.cardIdx, 1);
-
-            const simBoardArray = new Float32Array(300);
-            for (let i = 0; i < 100; i++) {
-                if (simGrid[i] === 2) simBoardArray[i] = 1.0;
-                else if (simGrid[i] === 1) simBoardArray[100 + i] = 1.0;
-            }
-
-            simHand.forEach(c => {
-                if (c && c !== '') {
-                    const tempState = { ...this.state, grid: simGrid };
-                    const { validMoves } = Rules.getValidMoves(tempState, c);
-                    validMoves.forEach(p => {
-                        simBoardArray[200 + p] = 1.0;
-                    });
-                }
-            });
-
-            const simHandArray = new Float32Array(52);
-            simHand.forEach(c => {
-                const id = this._getCardId(c);
-                if (id >= 0 && id <= 51) simHandArray[id] += 1.0;
-            });
-
-            const evalFeeds = {
-                "board_input": new ort.Tensor('float32', simBoardArray, [1, 3, 10, 10]),
-                "hand_input":  new ort.Tensor('float32', simHandArray, [1, 52])
-            };
-
-            const evalResults = await this.onnxSession.run(evalFeeds);
-            const futureValue = evalResults.value_output.data[0];
-            const combinedScore = futureValue + (cand.prior * 0.3);
-
-            if (combinedScore > bestOverallScore) {
-                bestOverallScore = combinedScore;
-                chosenMove = cand;
-            }
-        }
-
-        this.executeMove(2, chosenMove.pos, chosenMove.cardIdx, chosenMove.isRemoval);
-    }
-
-    _prepareTensorsForAI() {
-        const boardArray = new Float32Array(300);
-        for (let i = 0; i < 100; i++) {
-            const owner = this.state.grid[i];
-            if (owner === 2) boardArray[i] = 1.0;
-            else if (owner === 1) boardArray[100 + i] = 1.0;
-        }
-        this.state.hands[2].forEach(card => {
-            if (card && card !== '') {
-                const { validMoves } = Rules.getValidMoves(this.state, card);
-                validMoves.forEach(pos => {
-                    boardArray[200 + pos] = 1.0;
-                });
-            }
-        });
-        const handArray = new Float32Array(52);
-        for (const card of this.state.hands[2]) {
-            const cardId = this._getCardId(card);
-            if (cardId >= 0 && cardId <= 51) handArray[cardId] += 1.0;
-        }
-        return { boardArray, handArray };
-    }
-
-    _getCardId(cardStr) {
-        if (!cardStr || cardStr === "XX") return -1;
-        const suitChar = cardStr.slice(-1);
-        const rankStr = cardStr.slice(0, -1);
-        
-        let suitOffset = 0;
-        if (suitChar === 'D') suitOffset = 0;
-        else if (suitChar === 'C') suitOffset = 13;
-        else if (suitChar === 'H') suitOffset = 26;
-        else if (suitChar === 'S') suitOffset = 39;
-
-        let rankOffset = 0;
-        if (rankStr === 'A') rankOffset = 12;
-        else if (rankStr === 'K') rankOffset = 11;
-        else if (rankStr === 'Q') rankOffset = 10;
-        else if (rankStr === 'J') rankOffset = 9;
-        else rankOffset = parseInt(rankStr, 10) - 2;
-
-        return suitOffset + rankOffset;
+        this._pendingAiWinRate = aiWin;
+        this.executeMove(2, mv.pos, cardIdx, mv.is_removal);
     }
 
     _shuffle(array) {
