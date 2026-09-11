@@ -15,3 +15,10 @@ deploy.sh
 dataset_worker_*.bin
 *.pth
 onnxruntime-linux-x64-*/
+
+# Eseguibili compilati e librerie di terze parti: si rigenerano, e
+# libonnxruntime.so da sola pesa 15 MB.
+sequence_net/datagen/datagen
+sequence_net/datagen/match
+**/onnxruntime/
+*.o
