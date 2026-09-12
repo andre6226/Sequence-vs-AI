@@ -10,8 +10,11 @@ classifica.
 - **Gioco** — scacchiera 10×10, mano di 7 carte, Jack jolly e Jack di rimozione.
   Vince chi completa due sequenze da 5 pedine.
 - **AI** — MCTS con determinizzazione: a ogni mossa esplora migliaia di partite
-  simulate, ricampionando le carte che l'avversario potrebbe avere. Circa 6.000
-  simulazioni in 0,2 secondi.
+  simulate, ricampionando le carte che l'avversario potrebbe avere. Circa 8.000
+  simulazioni in 0,2 secondi nel browser, 13.500 compilato in nativo.
+  Essendo informazione imperfetta, una mossa non è disponibile in tutte le
+  simulazioni: la selezione la confronta solo con quelle in cui c'era davvero
+  (Information Set MCTS).
 - **Probabilità di vittoria** — la frazione di partite simulate che vinci. È una
   misura, non la previsione di un modello.
 - **Account** — registrazione, profilo, cambio password; sessione via JWT in
@@ -76,8 +79,8 @@ usa `eval`, che la Content-Security-Policy del sito blocca. Il gioco resterebbe
 muto, con un solo `EvalError` in console.
 
 Dopo ogni ricompilazione va incrementato il parametro di versione in
-`game.php` (`sequence.js?v=1`), altrimenti i browser continuano a servire la
-copia che hanno in cache.
+`game.php` (oggi `sequence.js?v=2`), altrimenti i browser continuano a servire
+la copia che hanno in cache.
 
 ### Gli strumenti nativi
 
@@ -115,7 +118,15 @@ WebAssembly senza trascinarsi dietro una libreria da 16 MB.
 
 Ogni mazzo viene giocato due volte a colori invertiti. Servono alcune centinaia
 di partite per distinguere differenze di pochi punti percentuali: su 120 partite
-l'incertezza è già di circa 4,5 punti.
+l'incertezza è già di circa 4,5 punti, e un risultato promettente a 1,5 sigma
+sparisce quasi sempre quando lo si rimisura su mazzi nuovi.
+
+Misure attuali, a 200 ms per mossa:
+
+| avversario | risultato |
+|---|---|
+| SequenceNetV2 a 1 ply | 60% su 300 partite |
+| motore euristico di un progetto Sequence esterno | 78% su 500 partite |
 
 ## Training della rete
 
