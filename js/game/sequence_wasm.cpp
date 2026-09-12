@@ -92,7 +92,7 @@ private:
     static MctsConfig defaultConfig() {
         MctsConfig c;
         c.budget_ms   = 200.0;
-        c.c_puct      = 1.6;
+        c.c_puct      = 2.5;
         c.prior_visits = 48;
         // In WebAssembly la memoria costa: un albero piu' contenuto basta,
         // visto che il tempo per mossa e' comunque una frazione di secondo.

@@ -41,7 +41,7 @@ using PriorFn = std::function<bool(Fast128 my, Fast128 opp,
 
 struct MctsConfig {
     double budget_ms      = 200.0;  // tempo per mossa
-    double c_puct         = 1.6;    // quanto spingere verso i rami poco esplorati
+    double c_puct         = 2.5;    // quanto spingere verso i rami poco esplorati
     int    prior_visits   = 48;     // visite prima di chiedere i prior a un nodo interno
     int    max_ply        = 140;    // taglio di sicurezza nei rollout
     bool   rollout_greedy = true;   // nei rollout, chiudere se si puo' vincere subito
@@ -67,13 +67,19 @@ public:
     // my/opp: bitboard dal punto di vista di chi deve muovere.
     // myHand: la mia mano (nota). oppHandSize/deckSize: quante carte hanno
     // l'avversario e il mazzo, l'unica cosa che se ne sa davvero.
+    // played: le carte gia' finite negli scarti, di entrambi i giocatori.
+    // Nel Sequence vero gli scarti sono scoperti, quindi e' informazione
+    // pubblica: tenerne conto non e' barare, e' contare le carte. Una lista
+    // vuota riporta al comportamento precedente.
     Move search(Fast128 my, Fast128 opp, const std::vector<int>& myHand,
-                size_t oppHandSize, size_t deckSize, MctsStats* out = nullptr)
+                size_t oppHandSize, size_t deckSize, MctsStats* out = nullptr,
+                const std::vector<int>& played = std::vector<int>())
     {
         m_nodes.clear();
         m_nodes.push_back(Node());
         m_rootMy = my; m_rootOpp = opp; m_rootHand = myHand;
         m_oppHandSize = oppHandSize; m_deckSize = deckSize;
+        m_played = played;
 
         std::vector<Move> rootMoves = legalMovesFor(my, opp, myHand);
         MctsStats st;
@@ -142,22 +148,26 @@ private:
     std::vector<Node> m_nodes;
     Fast128 m_rootMy{0,0}, m_rootOpp{0,0};
     std::vector<int> m_rootHand;
+    std::vector<int> m_played;        // carte gia' scartate, note a entrambi
     size_t m_oppHandSize = 0, m_deckSize = 0;
 
-    // Ricampiona mano avversaria e mazzo fra le carte che non ho in mano.
-    // Approssimazione nota: non si tiene conto di quali carte siano gia' state
-    // giocate, perche' dalla scacchiera non si ricostruisce (una pedina puo'
-    // venire da entrambe le copie, e i Jack non lasciano traccia).
+    // Ricampiona mano avversaria e mazzo fra le carte che non ho visto.
+    // "Non viste" = il mazzo doppio meno la mia mano meno gli scarti. Tenere
+    // conto degli scarti e' contare le carte: piu' la partita avanza, piu' il
+    // sacco da cui si pesca si restringe attorno a cio' che l'avversario puo'
+    // davvero avere, e le simulazioni smettono di dargli carte impossibili.
     Det determinize() {
         Det d;
         d.my = m_rootMy; d.opp = m_rootOpp; d.myHand = m_rootHand;
         std::vector<int> unseen;
         unseen.reserve(104);
         for (int i = 0; i < 52; i++) { unseen.push_back(i); unseen.push_back(i); }
-        for (int c : m_rootHand) {
+        auto strike = [&unseen](int c) {
             auto it = std::find(unseen.begin(), unseen.end(), c);
             if (it != unseen.end()) unseen.erase(it);
-        }
+        };
+        for (int c : m_rootHand) strike(c);
+        for (int c : m_played)   strike(c);
         std::shuffle(unseen.begin(), unseen.end(), m_rng);
         size_t n = std::min(m_oppHandSize, unseen.size());
         d.oppHand.assign(unseen.begin(), unseen.begin() + n);
@@ -256,11 +266,16 @@ private:
 
             if (pick < 0) {
                 double bestScore = -1e18;
-                double sqrtN = std::sqrt((double)std::max(1, m_nodes[node].visits));
                 for (int i : idx) {
                     const Node& ch = m_nodes[m_nodes[node].children[i]];
                     double q = (ch.visits > 0) ? (ch.sum / ch.visits) : 0.0;
                     if (!myTurn) q = -q;                   // l'avversario vuole l'opposto
+                    // Al denominatore le visite della mossa, al numeratore le
+                    // volte in cui era DISPONIBILE: una mossa che compare di
+                    // rado va confrontata solo con le simulazioni in cui c'era.
+                    // Usare le visite totali del nodo la faceva sembrare per
+                    // sempre inesplorata, e la ricerca ci si buttava sopra.
+                    double sqrtN = std::sqrt((double)std::max(1, m_nodes[node].avail[i]));
                     double u = m_cfg.c_puct * m_nodes[node].prior[i] * sqrtN / (1.0 + ch.visits);
                     double score = q + u;
                     if (score > bestScore) { bestScore = score; pick = i; }
