@@ -1,10 +1,14 @@
 // =====================================================================
 // Motore di Sequence per il browser, compilato in WebAssembly.
 //
-// Sostituisce il vecchio Monte Carlo piatto con un MCTS (mcts.hpp) e non
-// dipende da nessuna libreria esterna: niente ONNX, niente rete neurale.
-// La pagina non deve piu' scaricare il modello da 1,4 MB ne' il runtime
-// ONNX dalla CDN.
+// Un MCTS (mcts.hpp) guidato dai prior di SequenceNetV2. La rete gira qui
+// dentro, con l'inferenza scritta a mano di net.hpp: niente ONNX Runtime,
+// niente CDN. La pagina scarica i pesi (weights.bin, 1,4 MB) e li passa al
+// motore; se il file manca il gioco continua con i prior euristici.
+//
+// La rete ordina le mosse e basta. Valutare con lei anche le foglie
+// costerebbe 1,74 ms l'una contro 0,025 ms di una simulazione: sarebbero
+// 115 foglie invece di 8.000. Misurato, non stimato.
 //
 // Compilazione (dalla radice del progetto):
 //   source ~/emsdk/emsdk_env.sh
@@ -20,27 +24,49 @@
 // Interfaccia verso il JavaScript, nella stessa forma di prima:
 //   const Module = await createSequenceModule();
 //   const ai = new Module.SequenceEngine();
+//   ai.loadWeights(new Float32Array(buf));    // opzionale: attiva la rete
 //   const grid = new Module.VectorInt();       // 100 caselle: 0 vuota, 1 umano, 2 AI
 //   const hand = new Module.VectorString();    // "10C", "JD", ...
 //   const mv = ai.computeBestMove(grid, hand, 200, oppHandSize, deckSize);
 //   mv.pos / mv.card_idx / mv.is_removal
-//   ai.winRate()   // 0..1, stima di vittoria alla radice
+//   ai.winRate()   // 0..1, frazione di simulazioni vinte, non un output della rete
+//   ai.usingNet()  // true se i prior vengono dalla rete
 // =====================================================================
 
 #include "mcts.hpp"
 #include <emscripten/bind.h>
+#include <emscripten/val.h>
 #include <string>
 #include <vector>
 
 #include "heuristic_priors.hpp"
+#include "net_priors.hpp"
 
 // ---------------------------------------------------------------------
 class SequenceEngine {
 public:
-    SequenceEngine() : m_mcts(defaultConfig(), heuristicPriors) {
+    SequenceEngine() : m_cfg(defaultConfig()), m_mcts(m_cfg, heuristicPriors) {
         initGameConstants();
         m_mcts.seed((uint64_t)this ^ 0x5EC0FFEEull);
     }
+
+    // Riceve weights.bin come Float32Array. Da qui in poi i prior arrivano
+    // dalla rete. Se fallisce non succede niente di male: restano gli
+    // euristici, e il gioco e' identico a prima.
+    bool loadWeights(emscripten::val bytes) {
+        std::vector<float> w = emscripten::convertJSArrayToNumberVector<float>(bytes);
+        if (w.empty() || !m_net.loadFromMemory(w.data(), w.size())) return false;
+        m_usingNet = true;
+        m_cfg.prior_visits = NET_PRIOR_VISITS;
+        m_mcts.setConfig(m_cfg);
+        m_mcts.setPriors([this](Fast128 my, Fast128 opp, const std::vector<int>& hand,
+                                const std::vector<Move>& moves, std::vector<float>& out) {
+            return netPriors(m_net, my, opp, hand, moves, out);
+        });
+        return true;
+    }
+
+    bool usingNet() const { return m_usingNet; }
 
     // flatGrid: 100 valori, 0 vuota / 1 umano / 2 AI (come nello stato del gioco)
     // handStr : la mano dell'AI, nomi di carta
@@ -65,9 +91,8 @@ public:
             if (id >= 0) hand.push_back(id);
         }
 
-        MctsConfig cfg = defaultConfig();
-        cfg.budget_ms = (budgetMs > 0) ? (double)budgetMs : 200.0;
-        m_mcts.setConfig(cfg);
+        m_cfg.budget_ms = (budgetMs > 0) ? (double)budgetMs : 200.0;
+        m_mcts.setConfig(m_cfg);
 
         MctsStats st;
         Move mv = m_mcts.search(my, opp, hand,
@@ -93,22 +118,32 @@ private:
         MctsConfig c;
         c.budget_ms   = 200.0;
         c.c_puct      = 2.5;
-        c.prior_visits = 48;
+        c.prior_visits = 48;     // con i prior euristici, che costano zero
         // In WebAssembly la memoria costa: un albero piu' contenuto basta,
         // visto che il tempo per mossa e' comunque una frazione di secondo.
         c.max_nodes   = 120000;
         return c;
     }
 
-    Mcts   m_mcts;
-    double m_lastWinRate = 0.5;
-    long   m_lastSims = 0;
+    // Quanti nodi pagano la rete. Molto piu' alto della soglia euristica:
+    // in WebAssembly una valutazione costa 1,74 ms, e a soglia 48 la rete si
+    // mangerebbe meta' del budget. A 300 la paga poco piu' della radice.
+    static const int NET_PRIOR_VISITS = 300;
+
+    MctsConfig m_cfg;
+    Mcts       m_mcts;
+    snet::Net  m_net;
+    bool       m_usingNet = false;
+    double     m_lastWinRate = 0.5;
+    long       m_lastSims = 0;
 };
 
 EMSCRIPTEN_BINDINGS(sequence_module) {
     using namespace emscripten;
     class_<SequenceEngine>("SequenceEngine")
         .constructor<>()
+        .function("loadWeights", &SequenceEngine::loadWeights)
+        .function("usingNet", &SequenceEngine::usingNet)
         .function("computeBestMove", &SequenceEngine::computeBestMove)
         .function("winRate", &SequenceEngine::winRate)
         .function("simulations", &SequenceEngine::simulations);

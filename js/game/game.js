@@ -46,13 +46,32 @@ export class Game {
         }
     }
 
-    // Carica il motore compilato in WebAssembly. Nessuna rete neurale,
-    // nessuna CDN: sono circa 90 KB serviti dal sito stesso.
+    // Carica il motore compilato in WebAssembly, poi i pesi di
+    // SequenceNetV2 che gli servono per ordinare le mosse. Tutto servito dal
+    // sito: nessuna CDN, nessun runtime ONNX.
+    //
+    // I pesi sono facoltativi. Se il file non arriva il motore resta quello
+    // con i prior euristici, che gioca praticamente alla stessa forza: la
+    // partita comincia lo stesso invece di non cominciare affatto.
     async loadModel() {
         const Module = await createSequenceModule();
         this.wasm = Module;
         this.engine = new Module.SequenceEngine();
-        console.log("Motore MCTS (WebAssembly) caricato.");
+
+        try {
+            const res = await fetch("js/game/weights.bin?v=1");
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const buf = await res.arrayBuffer();
+            if (buf.byteLength % 4 !== 0) throw new Error("file troncato");
+            if (!this.engine.loadWeights(new Float32Array(buf))) {
+                throw new Error("pesi rifiutati dal motore");
+            }
+            console.log("Motore MCTS (WebAssembly) con prior da SequenceNetV2.");
+        } catch (err) {
+            console.warn("Pesi della rete non caricati, si usano i prior euristici:",
+                         err.message);
+        }
+
         if (this.state) {
             await this.updatePlayerPerspectiveWinRate();
         }

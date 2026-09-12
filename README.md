@@ -9,9 +9,10 @@ classifica.
 
 - **Gioco** — scacchiera 10×10, mano di 7 carte, Jack jolly e Jack di rimozione.
   Vince chi completa due sequenze da 5 pedine.
-- **AI** — MCTS con determinizzazione: a ogni mossa esplora migliaia di partite
-  simulate, ricampionando le carte che l'avversario potrebbe avere. Circa 8.000
-  simulazioni in 0,2 secondi nel browser, 13.500 compilato in nativo.
+- **AI** — MCTS con determinizzazione guidato da SequenceNetV2: a ogni mossa
+  esplora migliaia di partite simulate, ricampionando le carte che l'avversario
+  potrebbe avere. La rete ordina le mosse da esplorare; le foglie si valutano
+  giocando fino in fondo. Circa 6.800 simulazioni in 0,2 secondi nel browser.
   Essendo informazione imperfetta, una mossa non è disponibile in tutte le
   simulazioni: la selezione la confronta solo con quelle in cui c'era davvero
   (Information Set MCTS).
@@ -25,7 +26,8 @@ classifica.
 
 PHP 8.2 + Apache, MariaDB, JavaScript a moduli ES senza framework.
 Regole e stato della partita in JavaScript; il motore di ricerca è C++
-compilato in WebAssembly (93 KB in tutto), servito dal sito stesso.
+compilato in WebAssembly (100 KB), piu' i pesi della rete (1,4 MB). Tutto
+servito dal sito stesso: nessuna CDN, nessun runtime ONNX nel browser.
 
 ## Avvio
 
@@ -41,8 +43,9 @@ mariadb -u root -p <nome_db> < initdb             # crea le tabelle
 Le variabili d'ambiente del container hanno la precedenza sul `.env`, quindi in
 produzione il file può non esistere.
 
-Per giocare non serve compilare niente: `js/game/sequence.js` e
-`js/game/sequence.wasm` sono già nel repository.
+Per giocare non serve compilare niente: `js/game/sequence.js`,
+`js/game/sequence.wasm` e `js/game/weights.bin` sono già nel repository.
+I pesi si rigenerano dall'ONNX con `python3 sequence_net/export_weights.py`.
 
 ## Struttura
 
@@ -54,9 +57,12 @@ js/core/                   client API, UI, routing
 js/game/                   regole, stato della partita, rendering
   sequence_wasm.cpp        il motore per il browser
   sequence.js .wasm        il motore compilato, servito alla pagina
+  weights.bin              i pesi della rete, generati dall'.onnx
 sequence_net/              pipeline di training e strumenti di confronto
-sequence_net.onnx          rete SequenceNetV2: non serve piu' al sito,
-                           resta come riferimento nei confronti
+  datagen/net.hpp          inferenza della rete scritta a mano, senza ONNX
+  datagen/net_priors.hpp   feature e policy, condivise fra browser e nativo
+  export_weights.py        dall'.onnx a weights.bin
+sequence_net.onnx          rete SequenceNetV2, sorgente di verita' dei pesi
 ```
 
 ## Compilare
@@ -125,8 +131,13 @@ Misure attuali, a 200 ms per mossa:
 
 | avversario | risultato |
 |---|---|
-| SequenceNetV2 a 1 ply | 60% su 300 partite |
+| SequenceNetV2 a 1 ply | 59% su 350 partite |
 | motore euristico di un progetto Sequence esterno | 78% su 500 partite |
+
+La rete serve i prior, non la valutazione delle foglie, e la ragione e' il
+costo: una valutazione costa 1,74 ms in WebAssembly contro 0,025 ms di una
+simulazione completa. Sulle foglie ne resterebbero 115 invece di 6.800. Sui
+prior ne bastano una decina per ricerca, e pesano il 10% del budget.
 
 ## Training della rete
 
@@ -137,7 +148,8 @@ uso solo se la batte in un torneo diretto. Il notebook è pensato per Colab e
 rileva da solo se girare su Drive o in locale. `recover_weights.py` ricostruisce
 un checkpoint PyTorch da un `.onnx`, se il `.pth` è andato perso.
 
-La rete non è più l'avversario del gioco, ma resta il metro di paragone con cui
-sono state misurate tutte le versioni del motore.
+La rete non gioca più da sola come faceva a 1 ply: ora sta dentro la ricerca,
+e resta anche il metro di paragone con cui sono state misurate tutte le
+versioni del motore.
 
 [Grafo completo della rete (export Netron)](sequence_net/architettura.png)

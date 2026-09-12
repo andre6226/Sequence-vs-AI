@@ -34,7 +34,7 @@
 
 <!-- il parametro di versione va cambiato a ogni ricompilazione del motore,
      altrimenti i browser continuano a usare la copia in cache -->
-<script src="js/game/sequence.js?v=2"></script>
+<script src="js/game/sequence.js?v=3"></script>
 <script type="module">
     import { initGame } from './js/game/gamemain.js';
     initGame().catch(console.error);
