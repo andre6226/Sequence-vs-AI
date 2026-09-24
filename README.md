@@ -132,3 +132,7 @@ Drive o in locale. `recover_weights.py` ricostruisce un checkpoint PyTorch da un
 `.onnx`, se il `.pth` è andato perso.
 
 [Grafo completo della rete (export Netron)](sequence_net/architettura.png)
+
+## Licenza
+
+Distribuito con licenza MIT: vedi [LICENSE](LICENSE).
