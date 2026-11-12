@@ -59,7 +59,7 @@ export class Game {
         this.engine = new Module.SequenceEngine();
 
         try {
-            const res = await fetch("js/game/weights.bin?v=1");
+            const res = await fetch("js/game/weights.bin?v=2");
             if (!res.ok) throw new Error("HTTP " + res.status);
             const buf = await res.arrayBuffer();
             if (buf.byteLength % 4 !== 0) throw new Error("file troncato");
